@@ -55,6 +55,13 @@ def save_draws_to_file():
                 draw_copy['participants'] = list(draw_copy['participants'])
                 # Convert datetime to ISO format
                 draw_copy['end_time'] = draw_copy['end_time'].isoformat()
+
+                # 確保新舊版本相容
+                if 'winner_ids' not in draw_copy:
+                    draw_copy['winner_ids'] = [draw_copy.get('winner_id')] if draw_copy.get('winner_id') else []
+                if 'winners_count' not in draw_copy:
+                    draw_copy['winners_count'] = 1
+
                 save_data['draws'][str(draw_id)] = draw_copy
 
             # Save to temporary file first
@@ -98,6 +105,12 @@ def load_draws_from_file():
             if draw_data['end_time'].tzinfo is None:
                 draw_data['end_time'] = TIMEZONE.localize(draw_data['end_time'])
 
+            # 處理舊版本相容性
+            if 'winner_ids' not in draw_data:
+                draw_data['winner_ids'] = [draw_data.get('winner_id')] if draw_data.get('winner_id') else []
+            if 'winners_count' not in draw_data:
+                draw_data['winners_count'] = 1
+
             lucky_draws[draw_id] = draw_data
 
         print(f"已載入 {len(lucky_draws)} 個抽獎資料")
@@ -132,7 +145,7 @@ class LuckyDrawView(discord.ui.View):
         else:
             draw['participants'].add(user_id)
             await interaction.response.send_message(
-                f'✅ 成功參加抽獎！目前參加人數：{len(draw["participants"])}', 
+                f'✅ 成功參加抽獎！目前參加人數：{len(draw["participants"])}',
                 ephemeral=True
             )
 
@@ -156,20 +169,29 @@ def create_draw_embed(draw):
     minutes_left = max(0, int(time_left.total_seconds() / 60))
 
     embed.add_field(
-        name="⏰ 結束時間", 
-        value=draw['end_time'].strftime("%Y-%m-%d %H:%M:%S"), 
+        name="⏰ 結束時間",
+        value=draw['end_time'].strftime("%Y-%m-%d %H:%M:%S"),
         inline=True
     )
     embed.add_field(
-        name="⏱️ 剩餘時間", 
-        value=f"{minutes_left} 分鐘", 
+        name="⏱️ 剩餘時間",
+        value=f"{minutes_left} 分鐘",
         inline=True
     )
     embed.add_field(
-        name="👥 參加人數", 
-        value=f"{len(draw['participants'])} 人", 
+        name="👥 參加人數",
+        value=f"{len(draw['participants'])} 人",
         inline=True
     )
+
+    # 新增：顯示得獎者數量
+    winners_count = draw.get('winners_count', 1)
+    embed.add_field(
+        name="🏆 得獎名額",
+        value=f"{winners_count} 人",
+        inline=True
+    )
+
     embed.set_footer(text=f"抽獎ID: {draw['id']} | 創建者: {draw['creator_name']}")
 
     return embed
@@ -208,9 +230,10 @@ async def on_ready():
 @bot.tree.command(name='抽獎', description='創建一個新的抽獎活動')
 @app_commands.describe(
     prize='要抽出的獎品名稱（例如：Steam點數1000元）',
-    minutes='抽獎持續時間，以分鐘為單位（最少1分鐘，最多10080分鐘=7天）'
+    minutes='抽獎持續時間，以分鐘為單位（最少1分鐘，最多10080分鐘=7天）',
+    winners='要抽出的得獎者數量（預設1人，最多100人）'
 )
-async def create_lucky_draw(interaction: discord.Interaction, prize: str, minutes: int):
+async def create_lucky_draw(interaction: discord.Interaction, prize: str, minutes: int, winners: int = 1):
     global last_draw_id
 
     # 參數驗證
@@ -220,6 +243,14 @@ async def create_lucky_draw(interaction: discord.Interaction, prize: str, minute
 
     if minutes > 10080:  # 7天
         await interaction.response.send_message("❌ 持續時間不能超過7天（10080分鐘）！", ephemeral=True)
+        return
+
+    if winners < 1:
+        await interaction.response.send_message("❌ 得獎者數量必須至少1人！", ephemeral=True)
+        return
+
+    if winners > 100:
+        await interaction.response.send_message("❌ 得獎者數量不能超過100人！", ephemeral=True)
         return
 
     # 創建抽獎
@@ -236,7 +267,9 @@ async def create_lucky_draw(interaction: discord.Interaction, prize: str, minute
         'creator_id': interaction.user.id,
         'creator_name': interaction.user.name,
         'active': True,
-        'created_at': datetime.now(TIMEZONE).isoformat()
+        'created_at': datetime.now(TIMEZONE).isoformat(),
+        'winners_count': winners,  # 新增欄位
+        'winner_ids': []  # 改為列表以支援多個得獎者
     }
 
     lucky_draws[draw_id] = draw
@@ -247,14 +280,13 @@ async def create_lucky_draw(interaction: discord.Interaction, prize: str, minute
 
     # 發送抽獎訊息
     await interaction.response.send_message(
-        "@everyone 新的抽獎活動開始了！點擊下方按鈕參加！", 
-        embed=embed, 
+        "@everyone 新的抽獎活動開始了！點擊下方按鈕參加！",
+        embed=embed,
         view=view,
         allowed_mentions=discord.AllowedMentions(everyone=True)
     )
 
     # 儲存 message_id 以便重啟後恢復
-    # 注意：這需要在回應後取得
     try:
         message = await interaction.original_response()
         draw['message_id'] = message.id
@@ -295,10 +327,12 @@ async def list_draws(interaction: discord.Interaction):
         mins_left = minutes_left % 60
 
         time_str = f"{hours_left}小時{mins_left}分鐘" if hours_left > 0 else f"{mins_left}分鐘"
+        winners_count = draw.get('winners_count', 1)
 
         embed.add_field(
             name=f"🎁 ID: {draw['id']} - {draw['prize']}",
             value=f"👥 參加人數：{len(draw['participants'])}\n"
+                  f"🏆 得獎名額：{winners_count}\n"
                   f"⏰ 剩餘時間：{time_str}\n"
                   f"👤 創建者：{draw['creator_name']}",
             inline=False
@@ -351,13 +385,20 @@ async def draw_history(interaction: discord.Interaction, limit: int = 5):
 
     for draw in ended_draws:
         winner_text = "無人參加"
-        if 'winner_id' in draw and draw['winner_id']:
-            winner_text = f"<@{draw['winner_id']}>"
+        winner_ids = draw.get('winner_ids', [])
+
+        if winner_ids:
+            if len(winner_ids) == 1:
+                winner_text = f"<@{winner_ids[0]}>"
+            else:
+                winner_text = f"{len(winner_ids)} 位得獎者"
+
+        winners_count = draw.get('winners_count', 1)
 
         embed.add_field(
             name=f"ID: {draw['id']} - {draw['prize']}",
             value=f"🏆 得獎者：{winner_text}\n"
-                  f"👥 參加人數：{len(draw['participants'])}\n"
+                  f"👥 參加人數：{len(draw['participants'])} / 名額：{winners_count}\n"
                   f"📅 結束時間：{draw['end_time'].strftime('%m/%d %H:%M')}",
             inline=False
         )
@@ -428,7 +469,8 @@ async def help_command(interaction: discord.Interaction):
         name="🎉 `/抽獎`",
         value="創建新的抽獎活動\n"
               "• **prize**: 獎品名稱\n"
-              "• **minutes**: 持續時間（分鐘）",
+              "• **minutes**: 持續時間（分鐘）\n"
+              "• **winners**: 得獎者數量（選填，預設1人）",
         inline=False
     )
 
@@ -463,6 +505,7 @@ async def help_command(interaction: discord.Interaction):
         value="• 輸入 `/` 即可看到所有可用指令\n"
               "• 點擊「參加」按鈕參與抽獎\n"
               "• 每人每個抽獎只能參加一次\n"
+              "• 可設定多位得獎者（預設1位）\n"
               "• 時間到達後會自動開獎\n"
               "• 資料會定期自動儲存",
         inline=False
@@ -513,32 +556,51 @@ async def end_draw(draw_id):
         color=discord.Color.green()
     )
 
+    winners_count = draw.get('winners_count', 1)
+
     if len(draw['participants']) == 0:
         result_embed.add_field(
-            name="😢 結果", 
-            value="沒有人參加這次抽獎", 
+            name="😢 結果",
+            value="沒有人參加這次抽獎",
             inline=False
         )
-        draw['winner_id'] = None
+        draw['winner_ids'] = []
     else:
+        # 計算實際可抽出的得獎者數量
+        actual_winners_count = min(winners_count, len(draw['participants']))
+
         # 隨機抽出得獎者
-        winner_id = random.choice(list(draw['participants']))
-        draw['winner_id'] = winner_id
+        winner_ids = random.sample(list(draw['participants']), actual_winners_count)
+        draw['winner_ids'] = winner_ids
+
+        # 相容舊版本
+        draw['winner_id'] = winner_ids[0] if winner_ids else None
+
+        # 顯示所有得獎者
+        winners_text = "\n".join([f"{i+1}. <@{winner_id}>" for i, winner_id in enumerate(winner_ids)])
 
         result_embed.add_field(
-            name="🏆 恭喜得獎者", 
-            value=f"<@{winner_id}>", 
+            name=f"🏆 恭喜得獎者（共 {actual_winners_count} 位）",
+            value=winners_text,
             inline=False
         )
         result_embed.add_field(
-            name="🎉 獲得獎品", 
-            value=f"**{draw['prize']}**", 
+            name="🎉 獲得獎品",
+            value=f"**{draw['prize']}**",
             inline=False
         )
+
+        if actual_winners_count < winners_count:
+            result_embed.add_field(
+                name="⚠️ 注意",
+                value=f"原定抽 {winners_count} 位得獎者，但只有 {len(draw['participants'])} 人參加",
+                inline=False
+            )
 
     result_embed.add_field(
         name="📊 統計資訊",
         value=f"• 參加人數：{len(draw['participants'])} 人\n"
+              f"• 得獎名額：{winners_count} 人\n"
               f"• 抽獎ID：{draw_id}\n"
               f"• 創建者：{draw['creator_name']}",
         inline=False
@@ -550,7 +612,7 @@ async def end_draw(draw_id):
 
     # 發送結果
     await channel.send(
-        content="@everyone 抽獎結果出爐！" if draw['winner_id'] else "抽獎已結束",
+        content="@everyone 抽獎結果出爐！" if draw.get('winner_ids') else "抽獎已結束",
         embed=result_embed,
         allowed_mentions=discord.AllowedMentions(everyone=True)
     )
