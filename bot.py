@@ -142,6 +142,8 @@ class LuckyDrawView(discord.ui.View):
 
         if user_id in draw['participants']:
             await interaction.response.send_message('你已經參加過這個抽獎了！', ephemeral=True)
+        elif user_id == draw['creator_id']:
+            await interaction.response.send_message('創建者沒辦法參與抽獎！', ephemeral=True)
         else:
             draw['participants'].add(user_id)
             await interaction.response.send_message(
